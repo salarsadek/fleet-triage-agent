@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.dist-info/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+.env
+
+# Caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Data (keep folders, ignore contents)
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Outputs (keep folders, ignore generated artifacts)
+outputs/*
+!outputs/figures/.gitkeep
+!outputs/tables/.gitkeep
+!outputs/reports/.gitkeep
+
+# MLflow local tracking
+mlruns/
+
+# Generated decks / reports (ignore artifacts in report/)
+report/auto_deck.pptx
+report/auto_deck.pdf
+report/auto_report.tex
+report/auto_report.pdf
+
+# LaTeX build artifacts
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
+report/*.synctex.gz
+report/*.fls
+report/*.fdb_latexmk
