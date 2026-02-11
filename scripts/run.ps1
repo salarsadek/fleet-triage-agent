@@ -39,6 +39,9 @@ function Write-Usage {
   Write-Host "  test      Run tests"
   Write-Host "  lint      Ruff lint"
   Write-Host "  format    Black format"
+  Write-Host "Environment:"
+  Write-Host "  FLEET_EDITABLE=1     Try editable install (falls back if unsupported)."
+  Write-Host "  FLEET_PIP_TRUSTED=1  Add --trusted-host args to pip (use only if your network breaks SSL)."
   Write-Host ""
 }
 
@@ -79,12 +82,11 @@ function Resolve-ConfigPath([string]$Root, [string]$ConfigArg) {
   return (Resolve-Path $cfgPath).Path
 }
 
-function Try-Install-OptionalExtra([string]$PythonExe, [string]$ExtraSpec) {
-  try {
-    & $PythonExe -m pip install -e $ExtraSpec | Out-Host
-  } catch {
-    Write-Host "Note: optional install failed for '$ExtraSpec' (non-fatal)."
+function Get-PipTrustArgs {
+  if ($env:FLEET_PIP_TRUSTED -eq "1") {
+    return @("--trusted-host", "pypi.org", "--trusted-host", "files.pythonhosted.org", "--trusted-host", "pypi.python.org")
   }
+  return @()
 }
 
 function Invoke-Step([string]$Label, [scriptblock]$Action) {
@@ -180,9 +182,44 @@ try {
     "install" {
       Ensure-Venv -Root $root
       $python = Get-PythonExe -Root $root
-      Invoke-Step "Upgrading pip" { & $python -m pip install --upgrade pip }
-      Invoke-Step "Installing project (editable)" { & $python -m pip install -e . }
-      Try-Install-OptionalExtra -PythonExe $python -ExtraSpec ".[dev]"
+      $trust = Get-PipTrustArgs
+
+      Write-Host ""
+      Write-Host ">>> Upgrading pip/setuptools/wheel (best effort)"
+      & $python -m pip install --upgrade pip setuptools wheel @trust
+      if ($LASTEXITCODE -ne 0) {
+        Write-Host "NOTE: pip tooling upgrade failed; continuing with existing versions."
+      }
+
+      Write-Host ""
+      $editable = ($env:FLEET_EDITABLE -eq "1")
+      if ($editable) {
+        Write-Host ">>> Installing project in editable mode (FLEET_EDITABLE=1)"
+        & $python -m pip install -e @trust ".[dev]"
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "NOTE: Editable install failed; falling back to non-editable install."
+          Write-Host "      (Tip: pip >= 21.3 supports editable installs from pyproject.toml via PEP 660.)"
+          & $python -m pip install @trust ".[dev]"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host ""
+            Write-Host "If you see SSL certificate errors, try:"
+            Write-Host "  `$env:FLEET_PIP_TRUSTED=1"
+            Write-Host "  .\scripts\run.ps1 install"
+            throw "FAILED ($LASTEXITCODE): Installing project + deps"
+          }
+        }
+      } else {
+        Write-Host ">>> Installing project + dependencies"
+        & $python -m pip install @trust ".[dev]"
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host ""
+          Write-Host "If you see SSL certificate errors, try:"
+          Write-Host "  `$env:FLEET_PIP_TRUSTED=1"
+          Write-Host "  .\scripts\run.ps1 install"
+          throw "FAILED ($LASTEXITCODE): Installing project + deps"
+        }
+      }
+
       Write-Host "Done."
       break
     }
