@@ -162,19 +162,14 @@ function Ensure-RawData([string]$Root, [string]$PythonExe, [string]$ConfigPath) 
 }
 
 function Export-DeckToPdf-PowerPoint([string]$PptxPath, [string]$PdfPath) {
-  # Requires Microsoft PowerPoint installed.
   $ppt = $null
   $pres = $null
   try {
     $ppt = New-Object -ComObject PowerPoint.Application
-    # Avoid "hiding not allowed" issues: keep visible
     try { $ppt.Visible = 1 } catch { }
 
-    # Presentations.Open(FileName, ReadOnly, Untitled, WithWindow)
     $pres = $ppt.Presentations.Open($PptxPath, $true, $false, $true)
-
-    # 2 = ppFixedFormatTypePDF
-    $pres.ExportAsFixedFormat($PdfPath, 2)
+    $pres.ExportAsFixedFormat($PdfPath, 2)  # 2 = PDF
   } finally {
     if ($pres -ne $null) {
       try { $pres.Close() } catch { }
@@ -189,15 +184,13 @@ function Export-DeckToPdf-PowerPoint([string]$PptxPath, [string]$PdfPath) {
   }
 }
 
-function Export-DeckToPdf-LibreOffice([string]$Root, [string]$PptxPath, [string]$PdfOutDir) {
-  # Requires LibreOffice installed.
+function Export-DeckToPdf-LibreOffice([string]$PptxPath, [string]$PdfOutDir) {
   $sofficeExe = $null
 
   $candidates = @(
     (Join-Path $env:ProgramFiles "LibreOffice\program\soffice.exe"),
     (Join-Path $env:ProgramFiles "LibreOffice\program\soffice.com")
   )
-
   foreach ($c in $candidates) {
     if (Test-Path $c) { $sofficeExe = $c; break }
   }
@@ -207,9 +200,7 @@ function Export-DeckToPdf-LibreOffice([string]$Root, [string]$PptxPath, [string]
     if ($cmd) { $sofficeExe = $cmd.Source }
   }
 
-  if ($null -eq $sofficeExe) {
-    throw "LibreOffice not found."
-  }
+  if ($null -eq $sofficeExe) { throw "LibreOffice not found." }
 
   & $sofficeExe --headless --nologo --nofirststartwizard --norestore `
     --convert-to pdf --outdir $PdfOutDir $PptxPath | Out-Null
@@ -220,7 +211,7 @@ function Export-DeckToPdf-LibreOffice([string]$Root, [string]$PptxPath, [string]
   }
 }
 
-function Try-Export-DeckToPdf([string]$Root, [string]$PptxPath, [string]$PdfPath) {
+function Try-Export-DeckToPdf([string]$PptxPath, [string]$PdfPath) {
   $noPdf = $env:FLEET_DECK_NO_PDF
   if (-not [string]::IsNullOrWhiteSpace($noPdf)) {
     $t = $noPdf.Trim().ToLower()
@@ -230,7 +221,6 @@ function Try-Export-DeckToPdf([string]$Root, [string]$PptxPath, [string]$PdfPath
     }
   }
 
-  # Prefer PowerPoint COM on Windows (most reliable if installed)
   try {
     $ppt = New-Object -ComObject PowerPoint.Application
     $ppt.Quit()
@@ -244,17 +234,15 @@ function Try-Export-DeckToPdf([string]$Root, [string]$PptxPath, [string]$PdfPath
     Write-Host ("PowerPoint PDF export failed (will try LibreOffice): {0}" -f $_.Exception.Message)
   }
 
-  # Fallback to LibreOffice if available
   try {
     $outDir = Split-Path -Parent $PdfPath
-    Export-DeckToPdf-LibreOffice -Root $Root -PptxPath $PptxPath -PdfOutDir $outDir
+    Export-DeckToPdf-LibreOffice -PptxPath $PptxPath -PdfOutDir $outDir
 
     if (Test-Path $PdfPath) {
       Write-Host "PDF generated (LibreOffice): $PdfPath"
       return
     }
 
-    # LibreOffice output name sometimes matches pptx base name
     $base = [System.IO.Path]::GetFileNameWithoutExtension($PptxPath)
     $alt = Join-Path (Split-Path -Parent $PdfPath) ($base + ".pdf")
     if (Test-Path $alt) {
@@ -328,11 +316,10 @@ try {
       $pdfPath  = Join-Path $reportDir "auto_deck.pdf"
 
       Invoke-Step "Generate report\auto_deck.pptx" {
-        & $python -m src.reporting.make_auto_deck --config $configPath --out-pptx $pptxPath
+        & $python -m src.reporting.make_auto_deck --config $configPath --out $pptxPath
       }
 
-      # Optional PDF export (PowerPoint/LibreOffice)
-      Try-Export-DeckToPdf -Root $root -PptxPath $pptxPath -PdfPath $pdfPath
+      Try-Export-DeckToPdf -PptxPath $pptxPath -PdfPath $pdfPath
       break
     }
 
@@ -341,7 +328,6 @@ try {
 
       Write-Host "=== Report pipeline: data(if missing) -> validate -> EDA -> train -> triage -> aliases -> deck ==="
 
-      # Critical: fresh clones don't have data/raw/*.csv (gitignored). Make report turnkey.
       Ensure-RawData -Root $root -PythonExe $python -ConfigPath $configPath
 
       Invoke-Step "1) Data validation" {
@@ -371,11 +357,18 @@ try {
         & $python -m src.reporting.make_latest_aliases --config $configPath --top_similar 5
       }
 
-      # Build deck from latest artifacts (+ optional PDF)
-      Invoke-Step "6) Deck" {
-        & $python (Join-Path $root "scripts\run.ps1") deck --config $configPath
+      # IMPORTANT: generate the deck directly (do NOT call the PS script via python)
+      $reportDir = Join-Path $root "report"
+      if (-not (Test-Path $reportDir)) { New-Item -ItemType Directory -Force $reportDir | Out-Null }
+
+      $pptxPath = Join-Path $reportDir "auto_deck.pptx"
+      $pdfPath  = Join-Path $reportDir "auto_deck.pdf"
+
+      Invoke-Step "6) Generate report\auto_deck.pptx" {
+        & $python -m src.reporting.make_auto_deck --config $configPath --out $pptxPath
       }
 
+      Try-Export-DeckToPdf -PptxPath $pptxPath -PdfPath $pdfPath
       break
     }
 
