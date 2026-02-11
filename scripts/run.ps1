@@ -1,410 +1,381 @@
 <#
-scripts/run.ps1
-
-One-command entrypoints for the Fleet Maintenance Triage Agent project.
-
-Design goals
-- Always run from repo root.
-- Prefer local .venv if it exists.
-- Fail fast on non-zero native exit codes.
-- "report" should be turnkey for a fresh clone (auto-generate synthetic data if missing).
-- Deck PDF export is optional (PowerPoint COM preferred, LibreOffice fallback).
+Fleet Triage Agent task runner (Windows / PowerShell)
 
 Usage:
-  .\scripts\run.ps1 <task>
+  .\scripts\run.ps1 <task> [config.yaml]
 
 Tasks:
-  install   Create .venv and install deps
-  data      Generate synthetic data
-  validate  Run data quality validation (Great Expectations)
-  train     Train models and export artifacts
-  deck      Build report\auto_deck.pptx from existing artifacts (+ optional PDF)
-  report    Full pipeline -> data(if missing) -> validate -> EDA -> train -> triage -> aliases -> deck
+  help      Show this help
+  install   Create .venv and install dependencies
+  data      Generate synthetic data (data/raw/*.csv)
+  validate  Run Great Expectations validation
+  eda       EDA + survival stats (KM + Cox)
+  train     Train models + export artifacts
+  triage    Export triage snapshot artifacts
+  aliases   Create *_latest stable aliases
+  deck      Build report\auto_deck.pptx (+ PDF export)
+  report    Full pipeline: data(if missing) -> validate -> eda -> train -> triage -> aliases -> deck
   app       Run Streamlit GUI
-  test      Run tests
+  test      Run pytest
   lint      Ruff lint
   format    Black format
+
+Install in corp SSL environments:
+  - Quick (less secure): $env:FLEET_PIP_TRUSTED=1
+  - Better:            $env:FLEET_PIP_CERT="C:\path\to\corp-ca.pem"
 #>
 
-[CmdletBinding()]
 param(
-  [Parameter(Position = 0)]
-  [ValidateSet("help","install","data","validate","train","deck","report","app","test","lint","format")]
+  [Parameter(Position=0)]
+  [ValidateSet("help","install","data","validate","eda","train","triage","aliases","deck","report","app","test","lint","format")]
   [string]$task = "help",
 
-  [Parameter()]
+  [Parameter(Position=1)]
   [string]$config = "config.yaml"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Write-Usage {
+$root = Resolve-Path (Join-Path $PSScriptRoot "..")
+$configPath = Join-Path $root $config
+
+function Write-Section([string]$msg) {
   Write-Host ""
-  Write-Host "Usage:"
-  Write-Host "  .\scripts\run.ps1 <task>"
-  Write-Host ""
-  Write-Host "Tasks:"
-  Write-Host "  install   Create .venv and install deps"
-  Write-Host "  data      Generate synthetic data"
-  Write-Host "  validate  Run data quality validation (Great Expectations)"
-  Write-Host "  train     Train models and export artifacts"
-  Write-Host "  deck      Build report\auto_deck.pptx from existing artifacts (+ optional PDF)"
-  Write-Host "  report    Full pipeline -> data(if missing) -> validate -> EDA -> train -> triage -> aliases -> deck"
-  Write-Host "  app       Run Streamlit GUI"
-  Write-Host "  test      Run tests"
-  Write-Host "  lint      Ruff lint"
-  Write-Host "  format    Black format"
-  Write-Host ""
+  Write-Host $msg -ForegroundColor Cyan
 }
 
-function Get-RepoRoot {
-  return (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+function Invoke-Step([string]$Label, [scriptblock]$Block) {
+  Write-Section ">>> $Label"
+  & $Block
+  $code = $LASTEXITCODE
+  if ($code -ne 0) {
+    throw "FAILED ($code): $Label"
+  }
 }
 
-function Get-PythonExe([string]$Root) {
-  $venvPy = Join-Path $Root ".venv\Scripts\python.exe"
-  if (Test-Path $venvPy) { return $venvPy }
-  return "python"
+function Ensure-Dir([string]$Path) {
+  if (-not (Test-Path $Path)) { New-Item -ItemType Directory -Force -Path $Path | Out-Null }
+}
+
+function Ensure-GitKeep([string]$Dir) {
+  Ensure-Dir $Dir
+  $p = Join-Path $Dir ".gitkeep"
+  if (-not (Test-Path $p)) { New-Item -ItemType File -Force -Path $p | Out-Null }
+}
+
+function Get-VenvPython([string]$Root) {
+  $py = Join-Path $Root ".venv\Scripts\python.exe"
+  if (Test-Path $py) { return $py }
+  return $null
 }
 
 function Ensure-Venv([string]$Root) {
-  $venvDir = Join-Path $Root ".venv"
-  $venvPy  = Join-Path $Root ".venv\Scripts\python.exe"
+  $venvPy = Get-VenvPython -Root $Root
+  if ($venvPy) { return $venvPy }
 
-  if (Test-Path $venvPy) { return }
-
-  Write-Host "Creating virtual environment (.venv)..."
-  & python -m venv $venvDir
-
-  if (-not (Test-Path $venvPy)) {
-    throw "Failed to create .venv. Ensure Python is installed and on PATH."
-  }
+  $sysPy = (Get-Command python -ErrorAction Stop).Source
+  Write-Section "Creating virtual environment (.venv)..."
+  & $sysPy -m venv (Join-Path $Root ".venv")
+  $venvPy = Get-VenvPython -Root $Root
+  if (-not $venvPy) { throw "Failed to create venv at: $Root\.venv" }
+  return $venvPy
 }
 
-function Resolve-ConfigPath([string]$Root, [string]$ConfigArg) {
-  $cfg = $ConfigArg
-  if ([string]::IsNullOrWhiteSpace($cfg)) { $cfg = "config.yaml" }
-
-  $cfgPath = $cfg
-  if (-not [System.IO.Path]::IsPathRooted($cfgPath)) {
-    $cfgPath = Join-Path $Root $cfgPath
-  }
-
-  if (-not (Test-Path $cfgPath)) {
-    throw "Config file not found: $cfgPath"
-  }
-
-  return (Resolve-Path $cfgPath).Path
+function Get-PythonExe([string]$Root) {
+  $py = Get-VenvPython -Root $Root
+  if (-not $py) { throw ".venv not found. Run: .\scripts\run.ps1 install" }
+  return $py
 }
 
-function Get-PipTrustArgs {
-  # For corporate SSL interception issues:
-  #   $env:FLEET_PIP_TRUSTED=1
-  $v = $env:FLEET_PIP_TRUSTED
-  if ([string]::IsNullOrWhiteSpace($v)) { return @() }
-  $t = $v.Trim().ToLower()
-  if ($t -in @("1","true","yes","y","on")) {
-    return @("--trusted-host","pypi.org","--trusted-host","files.pythonhosted.org","--trusted-host","pypi.python.org")
+function Get-PipNetArgs {
+  $args = @("--disable-pip-version-check")
+  if ($env:FLEET_PIP_INDEX_URL)      { $args += @("-i", $env:FLEET_PIP_INDEX_URL) }
+  if ($env:FLEET_PIP_EXTRA_INDEX_URL){ $args += @("--extra-index-url", $env:FLEET_PIP_EXTRA_INDEX_URL) }
+  if ($env:FLEET_PIP_CERT)           { $args += @("--cert", $env:FLEET_PIP_CERT) }
+
+  if ($env:FLEET_PIP_TRUSTED -eq "1") {
+    $args += @("--trusted-host","pypi.org","--trusted-host","files.pythonhosted.org","--trusted-host","pypi.pythonhosted.org")
+    $args += @("--trusted-host","pypi.python.org")
   }
-  return @()
+  return ,$args
 }
 
-function Invoke-Step([string]$Label, [scriptblock]$Action) {
-  Write-Host ""
-  Write-Host ">>> $Label"
-  & $Action
-
-  $exitCode = $LASTEXITCODE
-  if ($exitCode -ne $null -and $exitCode -ne 0) {
-    throw "FAILED ($exitCode): $Label"
-  }
-}
-
-function Invoke-Step-Soft([string]$Label, [scriptblock]$Action) {
-  Write-Host ""
-  Write-Host ">>> $Label"
-  try {
-    & $Action
-  } catch {
-    Write-Host ("Note: step failed (continuing): {0}" -f $_.Exception.Message)
-    return
-  }
-
-  $exitCode = $LASTEXITCODE
-  if ($exitCode -ne $null -and $exitCode -ne 0) {
-    Write-Host "Note: step returned exit code $exitCode (continuing)."
-  }
-}
-
-function Ensure-RawData([string]$Root, [string]$PythonExe, [string]$ConfigPath) {
-  $rawDir = Join-Path $Root "data\raw"
-  $req = @(
-    (Join-Path $rawDir "vehicle_day.csv"),
-    (Join-Path $rawDir "dtc_event.csv"),
-    (Join-Path $rawDir "work_order.csv")
+function Invoke-Pip {
+  param(
+    [string]$Label,
+    [string]$PythonExe,
+    [string[]]$Args,
+    [switch]$RetryOnSsl
   )
 
+  Write-Section ">>> $Label"
+  $net = Get-PipNetArgs
+  $cmd = @("-m","pip") + $Args + $net
+
+  $out = & $PythonExe @cmd 2>&1
+  $code = $LASTEXITCODE
+  $out | ForEach-Object { Write-Host $_ }
+
+  if ($code -ne 0 -and $RetryOnSsl -and ($env:FLEET_PIP_TRUSTED -ne "1")) {
+    if ($out -match "CERTIFICATE_VERIFY_FAILED|certificate verify failed|SSLError|TLS") {
+      Write-Warning "pip failed due to SSL verification. Retrying with trusted-hosts (set FLEET_PIP_TRUSTED=1 to always do this)."
+      $trusted = @("--trusted-host","pypi.org","--trusted-host","files.pythonhosted.org","--trusted-host","pypi.pythonhosted.org","--trusted-host","pypi.python.org")
+      $cmd2 = @("-m","pip") + $Args + $trusted + $net
+      $out2 = & $PythonExe @cmd2 2>&1
+      $code2 = $LASTEXITCODE
+      $out2 | ForEach-Object { Write-Host $_ }
+      $code = $code2
+    }
+  }
+
+  if ($code -ne 0) { throw "FAILED ($code): $Label" }
+}
+
+function Assert-CoreDeps([string]$PythonExe) {
+  $code = "import numpy,pandas,sklearn,scipy,matplotlib,joblib,tqdm,yaml,lifelines,great_expectations,mlflow,streamlit,pptx,PIL; print('deps ok')"
+  $out = & $PythonExe -c $code 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    $out | ForEach-Object { Write-Host $_ }
+    throw "Python deps missing in .venv. Run: .\scripts\run.ps1 install"
+  }
+}
+
+function Ensure-RawDataOrGenerate([string]$PythonExe, [string]$ConfigPath) {
+  $p1 = Join-Path $root "data\raw\vehicle_day.csv"
+  $p2 = Join-Path $root "data\raw\dtc_event.csv"
+  $p3 = Join-Path $root "data\raw\work_order.csv"
   $missing = @()
-  foreach ($p in $req) {
-    if (-not (Test-Path $p)) { $missing += $p }
-  }
+  foreach ($p in @($p1,$p2,$p3)) { if (-not (Test-Path $p)) { $missing += $p } }
 
-  if ($missing.Count -eq 0) { return }
-
-  Write-Host ""
-  Write-Host "Raw data missing (fresh clone is expected). Generating synthetic data..."
-  foreach ($m in $missing) { Write-Host ("  - missing: {0}" -f $m) }
-
-  Invoke-Step "0) Generate synthetic data (data/raw/*.csv)" {
-    & $PythonExe -m src.data.simulate --config $ConfigPath
+  if ($missing.Count -gt 0) {
+    Write-Section "Raw data missing (fresh clone is expected). Generating synthetic data..."
+    foreach ($m in $missing) { Write-Host "  - missing: $m" }
+    Invoke-Step "0) Generate synthetic data (data/raw/*.csv)" {
+      & $PythonExe -m src.data.simulate --config $ConfigPath
+    }
   }
 }
 
-function Export-DeckToPdf-PowerPoint([string]$PptxPath, [string]$PdfPath) {
-  $ppt = $null
-  $pres = $null
+function Export-DeckPdf([string]$PptxPath, [string]$PdfPath) {
+  # 1) Try PowerPoint COM (best fidelity)
   try {
     $ppt = New-Object -ComObject PowerPoint.Application
-    try { $ppt.Visible = 1 } catch { }
+    # Some PowerPoint versions do not allow hiding; keep it non-intrusive with WithWindow=$false below
+    $ppt.Visible = 1
 
-    $pres = $ppt.Presentations.Open($PptxPath, $true, $false, $true)
-    $pres.ExportAsFixedFormat($PdfPath, 2)  # 2 = PDF
-  } finally {
-    if ($pres -ne $null) {
-      try { $pres.Close() } catch { }
-      try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($pres) } catch { }
-    }
-    if ($ppt -ne $null) {
-      try { $ppt.Quit() } catch { }
-      try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ppt) } catch { }
-    }
-    [gc]::Collect()
-    [gc]::WaitForPendingFinalizers()
-  }
-}
+    $fullPptx = (Resolve-Path $PptxPath).Path
+    $fullPdf  = (Resolve-Path (Split-Path $PdfPath -Parent)).Path + "\" + (Split-Path $PdfPath -Leaf)
 
-function Export-DeckToPdf-LibreOffice([string]$PptxPath, [string]$PdfOutDir) {
-  $sofficeExe = $null
-
-  $candidates = @(
-    (Join-Path $env:ProgramFiles "LibreOffice\program\soffice.exe"),
-    (Join-Path $env:ProgramFiles "LibreOffice\program\soffice.com")
-  )
-  foreach ($c in $candidates) {
-    if (Test-Path $c) { $sofficeExe = $c; break }
-  }
-
-  if ($null -eq $sofficeExe) {
-    $cmd = Get-Command soffice -ErrorAction SilentlyContinue
-    if ($cmd) { $sofficeExe = $cmd.Source }
-  }
-
-  if ($null -eq $sofficeExe) { throw "LibreOffice not found." }
-
-  & $sofficeExe --headless --nologo --nofirststartwizard --norestore `
-    --convert-to pdf --outdir $PdfOutDir $PptxPath | Out-Null
-
-  $exitCode = $LASTEXITCODE
-  if ($exitCode -ne $null -and $exitCode -ne 0) {
-    throw "LibreOffice export failed (exit code $exitCode)."
-  }
-}
-
-function Try-Export-DeckToPdf([string]$PptxPath, [string]$PdfPath) {
-  $noPdf = $env:FLEET_DECK_NO_PDF
-  if (-not [string]::IsNullOrWhiteSpace($noPdf)) {
-    $t = $noPdf.Trim().ToLower()
-    if ($t -in @("1","true","yes","y","on")) {
-      Write-Host "PDF export disabled via FLEET_DECK_NO_PDF=1"
-      return
-    }
-  }
-
-  try {
-    $ppt = New-Object -ComObject PowerPoint.Application
+    $pres = $ppt.Presentations.Open($fullPptx, $true, $true, $false)
+    # SaveAs PDF (32 = ppSaveAsPDF)
+    $pres.SaveAs($fullPdf, 32)
+    $pres.Close()
     $ppt.Quit()
-    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ppt)
-    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
 
-    Export-DeckToPdf-PowerPoint -PptxPath $PptxPath -PdfPath $PdfPath
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pres) | Out-Null
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($ppt)  | Out-Null
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+
     Write-Host "PDF generated (PowerPoint): $PdfPath"
     return
   } catch {
-    Write-Host ("PowerPoint PDF export failed (will try LibreOffice): {0}" -f $_.Exception.Message)
+    Write-Warning "PowerPoint PDF export failed (will try LibreOffice): $($_.Exception.Message)"
+    try { if ($ppt) { $ppt.Quit() | Out-Null } } catch {}
   }
 
-  try {
-    $outDir = Split-Path -Parent $PdfPath
-    Export-DeckToPdf-LibreOffice -PptxPath $PptxPath -PdfOutDir $outDir
+  # 2) Fallback: LibreOffice (headless)
+  $soffice = (Get-Command soffice.com -ErrorAction SilentlyContinue)
+  if (-not $soffice) { $soffice = (Get-Command soffice.exe -ErrorAction SilentlyContinue) }
 
-    if (Test-Path $PdfPath) {
-      Write-Host "PDF generated (LibreOffice): $PdfPath"
-      return
-    }
+  if (-not $soffice) {
+    Write-Warning "No PDF exporter found (PowerPoint/LibreOffice). PPTX generated only: $PptxPath"
+    return
+  }
 
-    $base = [System.IO.Path]::GetFileNameWithoutExtension($PptxPath)
-    $alt = Join-Path (Split-Path -Parent $PdfPath) ($base + ".pdf")
-    if (Test-Path $alt) {
-      Move-Item -Force $alt $PdfPath
-      Write-Host "PDF generated (LibreOffice): $PdfPath"
-      return
-    }
+  $outDir = Split-Path $PdfPath -Parent
+  Ensure-Dir $outDir
 
-    throw "LibreOffice ran but PDF not found."
-  } catch {
-    Write-Host ("No PDF exporter found (LibreOffice/PowerPoint). PPTX generated only: {0}" -f $PptxPath)
+  Write-Section ">>> Export deck to PDF (LibreOffice)"
+  & $soffice.Source --headless --nologo --nofirststartwizard --norestore --convert-to pdf --outdir $outDir $PptxPath | Out-Null
+
+  if (Test-Path $PdfPath) {
+    Write-Host "PDF generated (LibreOffice): $PdfPath"
+  } else {
+    Write-Warning "LibreOffice conversion ran but PDF not found at: $PdfPath"
   }
 }
 
-$root = Get-RepoRoot
 Push-Location $root
 try {
-  $configPath = Resolve-ConfigPath -Root $root -ConfigArg $config
-
   switch ($task) {
 
-    "help" { Write-Usage; break }
+    "help" {
+      Write-Host (Get-Content $PSCommandPath -TotalCount 40 | Out-String)
+      break
+    }
 
     "install" {
-      Ensure-Venv -Root $root
-      $python = Get-PythonExe -Root $root
-      $trust = Get-PipTrustArgs
+      Ensure-GitKeep (Join-Path $root "data\raw")
+      Ensure-GitKeep (Join-Path $root "data\processed")
 
-      Invoke-Step-Soft "Upgrading pip (best-effort)" {
-        & $python -m pip install --upgrade pip setuptools wheel @trust
+      $python = Ensure-Venv -Root $root
+
+      $req = Join-Path $root "requirements.txt"
+      $reqDev = Join-Path $root "requirements-dev.txt"
+      if (-not (Test-Path $req))    { throw "Missing requirements.txt (expected at repo root)." }
+      if (-not (Test-Path $reqDev)) { throw "Missing requirements-dev.txt (expected at repo root)." }
+
+      # Best-effort upgrade (don’t block install on corp SSL)
+      try {
+        Invoke-Pip -Label "Upgrading pip/setuptools/wheel (best-effort)" -PythonExe $python -Args @("install","-U","pip","setuptools","wheel") -RetryOnSsl
+      } catch {
+        Write-Warning "pip upgrade failed; continuing. ($($_.Exception.Message))"
       }
 
-      Invoke-Step "Installing project + dependencies" {
-        & $python -m pip install ".[dev]" @trust
+      Invoke-Pip -Label "Installing project dependencies" -PythonExe $python -Args @("install","-r",$req,"-r",$reqDev) -RetryOnSsl
+
+      Invoke-Step "Verify core imports" {
+        Assert-CoreDeps -PythonExe $python
       }
 
-      Write-Host "Done."
+      Write-Host "Install complete."
       break
     }
 
-    "data" {
+    default {
       $python = Get-PythonExe -Root $root
-      Invoke-Step "Generate synthetic data" {
-        & $python -m src.data.simulate --config $configPath
+      Assert-CoreDeps -PythonExe $python
+
+      if (-not (Test-Path $configPath)) { throw "Config not found: $configPath" }
+
+      switch ($task) {
+
+        "data" {
+          Invoke-Step "Generate synthetic data (data/raw/*.csv)" {
+            & $python -m src.data.simulate --config $configPath
+          }
+          break
+        }
+
+        "validate" {
+          Invoke-Step "Data validation" {
+            & $python -m src.data.validate --config $configPath
+          }
+          break
+        }
+
+        "eda" {
+          Invoke-Step "EDA + stats (KM + Cox)" {
+            & $python -m src.reporting.eda_stats --config $configPath
+          }
+          break
+        }
+
+        "train" {
+          Invoke-Step "Train models + export artifacts" {
+            & $python -m src.models.train --config $configPath
+          }
+          break
+        }
+
+        "triage" {
+          Invoke-Step "Export triage snapshot" {
+            & $python -m src.reporting.triage_snapshot --config $configPath
+          }
+          break
+        }
+
+        "aliases" {
+          Invoke-Step "Create *_latest aliases" {
+            & $python -m src.reporting.make_latest_aliases --config $configPath
+          }
+          break
+        }
+
+        "deck" {
+          Ensure-Dir (Join-Path $root "report")
+
+          $pptxPath = Join-Path $root "report\auto_deck.pptx"
+          $pdfPath  = Join-Path $root "report\auto_deck.pdf"
+
+          Invoke-Step "Generate report\auto_deck.pptx" {
+            & $python -m src.reporting.make_auto_deck --config $configPath --out $pptxPath
+          }
+
+          # Optional: print slide count if available
+          try {
+            $cnt = & $python -c "from pptx import Presentation; p=Presentation(r'report/auto_deck.pptx'); print('Slides:', len(p.slides))"
+            Write-Host $cnt
+          } catch {}
+
+          Export-DeckPdf -PptxPath $pptxPath -PdfPath $pdfPath
+          break
+        }
+
+        "report" {
+          Write-Section "=== Report pipeline: data(if missing) -> validate -> EDA -> train -> triage -> aliases -> deck ==="
+
+          Ensure-RawDataOrGenerate -PythonExe $python -ConfigPath $configPath
+
+          Invoke-Step "1) Data validation" {
+            & $python -m src.data.validate --config $configPath
+          }
+
+          Invoke-Step "2) EDA + stats (tables + KM + Cox)" {
+            & $python -m src.reporting.eda_stats --config $configPath
+          }
+
+          Invoke-Step "3) Train models (tables + calibration/PR + models)" {
+            & $python -m src.models.train --config $configPath
+          }
+
+          Invoke-Step "4) Export triage snapshot (tables/figures/snippet)" {
+            & $python -m src.reporting.triage_snapshot --config $configPath
+          }
+
+          Invoke-Step "5) Create *_latest aliases (stable filenames)" {
+            & $python -m src.reporting.make_latest_aliases --config $configPath
+          }
+
+          Invoke-Step "6) Deck" {
+            & $PSCommandPath deck $config
+          }
+          break
+        }
+
+        "app" {
+          $appPath = Join-Path $root "app\streamlit_app.py"
+          if (-not (Test-Path $appPath)) { throw "Streamlit app not found: $appPath" }
+
+          Invoke-Step "Run Streamlit app" {
+            & $python -m streamlit run $appPath -- --config $configPath
+          }
+          break
+        }
+
+        "test" {
+          Invoke-Step "Run pytest" {
+            & $python -m pytest -q
+          }
+          break
+        }
+
+        "lint" {
+          Invoke-Step "Ruff lint" {
+            & $python -m ruff check .
+          }
+          break
+        }
+
+        "format" {
+          Invoke-Step "Black format" {
+            & $python -m black .
+          }
+          break
+        }
       }
-      break
-    }
-
-    "validate" {
-      $python = Get-PythonExe -Root $root
-      Invoke-Step "Validate data (Great Expectations)" {
-        & $python -m src.data.validate --config $configPath
-      }
-      break
-    }
-
-    "train" {
-      $python = Get-PythonExe -Root $root
-      Invoke-Step "Train models + export evaluation artifacts" {
-        & $python -m src.models.train --config $configPath
-      }
-      break
-    }
-
-    "deck" {
-      $python = Get-PythonExe -Root $root
-      $reportDir = Join-Path $root "report"
-      if (-not (Test-Path $reportDir)) { New-Item -ItemType Directory -Force $reportDir | Out-Null }
-
-      $pptxPath = Join-Path $reportDir "auto_deck.pptx"
-      $pdfPath  = Join-Path $reportDir "auto_deck.pdf"
-
-      Invoke-Step "Generate report\auto_deck.pptx" {
-        & $python -m src.reporting.make_auto_deck --config $configPath --out $pptxPath
-      }
-
-      Try-Export-DeckToPdf -PptxPath $pptxPath -PdfPath $pdfPath
-      break
-    }
-
-    "report" {
-      $python = Get-PythonExe -Root $root
-
-      Write-Host "=== Report pipeline: data(if missing) -> validate -> EDA -> train -> triage -> aliases -> deck ==="
-
-      Ensure-RawData -Root $root -PythonExe $python -ConfigPath $configPath
-
-      Invoke-Step "1) Data validation" {
-        & $python -m src.data.validate --config $configPath
-      }
-
-      Invoke-Step "2) EDA + stats (tables + KM + Cox)" {
-        & $python -m src.reporting.eda_stats --config $configPath
-      }
-
-      Invoke-Step "3) Train models (tables + calibration/PR + models)" {
-        & $python -m src.models.train --config $configPath
-      }
-
-      Invoke-Step "4) Export triage snapshot (tables/figures/snippet)" {
-        & $python -m src.reporting.triage_snapshot `
-          --config $configPath `
-          --horizon 30 `
-          --model hgb `
-          --k 10 `
-          --ranking cost `
-          --evidence 5 `
-          --evidence_topn 5
-      }
-
-      Invoke-Step "5) Create *_latest aliases (stable filenames)" {
-        & $python -m src.reporting.make_latest_aliases --config $configPath --top_similar 5
-      }
-
-      # IMPORTANT: generate the deck directly (do NOT call the PS script via python)
-      $reportDir = Join-Path $root "report"
-      if (-not (Test-Path $reportDir)) { New-Item -ItemType Directory -Force $reportDir | Out-Null }
-
-      $pptxPath = Join-Path $reportDir "auto_deck.pptx"
-      $pdfPath  = Join-Path $reportDir "auto_deck.pdf"
-
-      Invoke-Step "6) Generate report\auto_deck.pptx" {
-        & $python -m src.reporting.make_auto_deck --config $configPath --out $pptxPath
-      }
-
-      Try-Export-DeckToPdf -PptxPath $pptxPath -PdfPath $pdfPath
-      break
-    }
-
-    "app" {
-      $python = Get-PythonExe -Root $root
-      $appPath = Join-Path $root "app\streamlit_app.py"
-      if (-not (Test-Path $appPath)) { throw "Streamlit app not found: $appPath" }
-
-      Invoke-Step "Run Streamlit app" {
-        & $python -m streamlit run $appPath -- --config $configPath
-      }
-      break
-    }
-
-    "test" {
-      $python = Get-PythonExe -Root $root
-      Invoke-Step "Run pytest" {
-        & $python -m pytest -q
-      }
-      break
-    }
-
-    "lint" {
-      $python = Get-PythonExe -Root $root
-      Invoke-Step "Ruff lint" {
-        & $python -m ruff check .
-      }
-      break
-    }
-
-    "format" {
-      $python = Get-PythonExe -Root $root
-      Invoke-Step "Black format" {
-        & $python -m black .
-      }
-      break
     }
   }
 

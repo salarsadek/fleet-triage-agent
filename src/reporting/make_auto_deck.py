@@ -285,14 +285,14 @@ def add_bullets(slide, bullets: Iterable[str], left, top, width, height, font_si
 
     bullets = list(bullets) or ["(no content)"]
     p0 = tf.paragraphs[0]
-    p0.text = f"• {bullets[0]}"
+    p0.text = f"Ã¢â‚¬Â¢ {bullets[0]}"
     p0.font.name = FONT_BODY
     p0.font.size = Pt(font_size)
     p0.font.color.rgb = TEXT_DARK
 
     for b in bullets[1:]:
         p = tf.add_paragraph()
-        p.text = f"• {b}"
+        p.text = f"Ã¢â‚¬Â¢ {b}"
         p.font.name = FONT_BODY
         p.font.size = Pt(font_size)
         p.font.color.rgb = TEXT_DARK
@@ -321,7 +321,6 @@ def add_interpretation_panel(slide, bullets: list[str], left, top, width, height
         top=top + Inches(0.35),
         width=width - 2 * PAD,
         height=height - Inches(0.40),
-        font_size=13,
     )
 
 
@@ -519,7 +518,7 @@ def summarize_cox(df: pd.DataFrame, topn: int = 2) -> list[str]:
     for _, r in d2.head(topn).iterrows():
         hr = float(r[c_hr])
         if hr >= 1.0:
-            items.append(f"Top risk-increasing factor: {r[c_feat]} (HR≈{hr:.2f}; >1 increases hazard).")
+            items.append(f"Top risk-increasing factor: {r[c_feat]} (HRÃ¢â€°Ë†{hr:.2f}; >1 increases hazard).")
     return items
 
 
@@ -574,6 +573,42 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+
+def _slide_has_interpretation(slide) -> bool:
+    for sh in slide.shapes:
+        if hasattr(sh, "text") and sh.text and ("How to interpret" in sh.text):
+            return True
+    return False
+
+
+def ensure_interpretation_panels(prs: Presentation) -> None:
+    """Post-pass: guarantee every slide contains a 'How to interpret' panel.
+    This prevents deck regressions when new slide types are added.
+    """
+    panel_h = Inches(1.05)
+    gap = Inches(0.05)
+    top = SLIDE_H - FOOTER_H - panel_h - gap
+
+    generic = [
+        "Use the title to anchor what youâ€™re looking at.",
+        "Focus on the main trend / ranking and compare relative differences.",
+        "Use this as supporting context for the narrative in adjacent slides.",
+    ]
+
+    for slide in prs.slides:
+        if _slide_has_interpretation(slide):
+            continue
+
+        add_interpretation_panel(
+            slide,
+            generic,
+            left=MARGIN_L,
+            top=top,
+            width=SLIDE_W - 2 * MARGIN_L,
+            height=panel_h,
+        )
+
+
 def main() -> None:
     args = parse_args()
     root = repo_root()
@@ -592,7 +627,7 @@ def main() -> None:
 
     stamp, model, horizon = infer_stamp_model_horizon(paths)
 
-    footer_left = "fleet-triage-agent • auto-generated deck"
+    footer_left = "fleet-triage-agent Ã¢â‚¬Â¢ auto-generated deck"
     footer_right = f"snapshot: {stamp}"
 
     prs = Presentation()
@@ -617,16 +652,15 @@ def main() -> None:
         slide,
         [
             "Objective: prioritize vehicles for service using predicted near-term breakdown risk and operational cost.",
-            "Reproducible pipeline: validate → EDA/stats → train → triage snapshot → latest aliases → deck/PDF.",
+            "Reproducible pipeline: validate Ã¢â€ â€™ EDA/stats Ã¢â€ â€™ train Ã¢â€ â€™ triage snapshot Ã¢â€ â€™ latest aliases Ã¢â€ â€™ deck/PDF.",
             "Slides are built from exported artifacts in outputs/ (figures + tables).",
         ],
-        left=MARGIN_L, top=BODY_TOP, width=full_w, height=Inches(2.2), font_size=18
-    )
+        left=MARGIN_L, top=BODY_TOP, width=full_w, height=Inches(2.2))
     add_interpretation_panel(
         slide,
         [
             "This deck is fully reproducible: rerun the pipeline to refresh numbers and visuals.",
-            "The ‘snapshot’ in the footer tells you which triage run the deck is based on.",
+            "The Ã¢â‚¬ËœsnapshotÃ¢â‚¬â„¢ in the footer tells you which triage run the deck is based on.",
         ],
         left=MARGIN_L, top=note_y, width=full_w, height=NOTE_H
     )
@@ -643,8 +677,7 @@ def main() -> None:
             "Guardrails + similar-case evidence",
             "Appendix: additional artifacts",
         ],
-        left=MARGIN_L, top=BODY_TOP, width=full_w, height=MEDIA_H, font_size=18
-    )
+        left=MARGIN_L, top=BODY_TOP, width=full_w, height=MEDIA_H)
     add_interpretation_panel(
         slide,
         [
@@ -662,8 +695,7 @@ def main() -> None:
             r"Run full pipeline:  .\scripts\run.ps1 report",
             r"Or rebuild deck only: .\scripts\run.ps1 deck",
         ],
-        left=MARGIN_L, top=BODY_TOP, width=full_w, height=Inches(1.2), font_size=16
-    )
+        left=MARGIN_L, top=BODY_TOP, width=full_w, height=Inches(1.2))
     add_interpretation_panel(
         slide,
         [
@@ -759,7 +791,7 @@ def main() -> None:
             "This is the foundation for a production-quality ML/agent workflow.",
         ]
     )
-    add_bullets(slide, bullets, MARGIN_L, BODY_TOP, full_w, BODY_H, font_size=18)
+    add_bullets(slide, bullets, MARGIN_L, BODY_TOP, full_w, BODY_H)
 
     # -----------------------------
     # EDA + stats
@@ -799,7 +831,7 @@ def main() -> None:
     cox = safe_read_csv(paths.tables / "cox_hazard_ratios.csv")
 
     if km.exists():
-        add_media_card(slide, km, MARGIN_L, BODY_TOP, col_w, MEDIA_H, caption="Kaplan–Meier by duty-cycle group")
+        add_media_card(slide, km, MARGIN_L, BODY_TOP, col_w, MEDIA_H, caption="KaplanÃ¢â‚¬â€œMeier by duty-cycle group")
         used_figs.add(km.name)
     else:
         missing.append("outputs/figures/km_duty_cycle.png")
@@ -814,7 +846,7 @@ def main() -> None:
     add_interpretation_panel(
         slide,
         [
-            "Kaplan–Meier: lower curve means faster failures; separation suggests duty cycle impacts reliability.",
+            "KaplanÃ¢â‚¬â€œMeier: lower curve means faster failures; separation suggests duty cycle impacts reliability.",
             "Cox hazard ratios: HR>1 increases failure hazard, HR<1 decreases; bigger deviation from 1 = stronger effect.",
             "These results help explain *why* certain vehicles get prioritized (not only that they do).",
         ],
@@ -829,25 +861,25 @@ def main() -> None:
     if wo_df is not None:
         bullets.extend(summarize_work_orders(wo_df, topn=2))
     else:
-        bullets.append("Work orders: missing table → rerun report to regenerate.")
+        bullets.append("Work orders: missing table Ã¢â€ â€™ rerun report to regenerate.")
     if cox is not None:
         bullets.extend(summarize_cox(cox, topn=2))
     else:
-        bullets.append("Cox model: missing hazard ratios → rerun report to regenerate.")
+        bullets.append("Cox model: missing hazard ratios Ã¢â€ â€™ rerun report to regenerate.")
     bullets.append("Use these insights to propose targeted interventions (routes, duty cycles, subsystems).")
-    add_bullets(slide, bullets, MARGIN_L, BODY_TOP, full_w, BODY_H, font_size=18)
+    add_bullets(slide, bullets, MARGIN_L, BODY_TOP, full_w, BODY_H)
 
     # -----------------------------
     # Model performance
     # -----------------------------
     add_section_divider(prs, footer_left, footer_right, "Model performance", "Calibration + ranking quality")
 
-    slide = slide_blank(prs, "Model performance", f"{model} • {horizon}", footer_left, footer_right)
+    slide = slide_blank(prs, "Model performance", f"{model} Ã¢â‚¬Â¢ {horizon}", footer_left, footer_right)
     pr = paths.figures / f"pr_{model}_{horizon}.png"
     cal = paths.figures / f"calibration_{model}_{horizon}.png"
 
     if pr.exists():
-        add_media_card(slide, pr, MARGIN_L, BODY_TOP, col_w, MEDIA_H, caption="Precision–Recall")
+        add_media_card(slide, pr, MARGIN_L, BODY_TOP, col_w, MEDIA_H, caption="PrecisionÃ¢â‚¬â€œRecall")
         used_figs.add(pr.name)
     else:
         missing.append(f"outputs/figures/pr_{model}_{horizon}.png")
@@ -861,7 +893,7 @@ def main() -> None:
     add_interpretation_panel(
         slide,
         [
-            "Precision–Recall: higher is better; focus on precision at the recall region you need operationally.",
+            "PrecisionÃ¢â‚¬â€œRecall: higher is better; focus on precision at the recall region you need operationally.",
             "Calibration: points close to the diagonal mean predicted probabilities match real-world frequencies.",
             "Good ranking (PR) helps choose *which* vehicles; good calibration helps decide *how urgent* they are.",
         ],
@@ -898,7 +930,7 @@ def main() -> None:
         [
             "Risk metrics: compare models; higher AUPRC is better for rare events.",
             "Precision@K: if K is your service capacity, this approximates how many queued vehicles are truly high-risk.",
-            "Use these tables to justify the selected model and why it’s operationally useful.",
+            "Use these tables to justify the selected model and why itÃ¢â‚¬â„¢s operationally useful.",
         ],
         left=MARGIN_L, top=note_y, width=full_w, height=NOTE_H
     )
@@ -911,14 +943,14 @@ def main() -> None:
     if rm_df is not None:
         bullets.extend(summarize_risk_metrics(rm_df))
     else:
-        bullets.append("Risk metrics missing → rerun report to regenerate.")
+        bullets.append("Risk metrics missing Ã¢â€ â€™ rerun report to regenerate.")
     bullets.extend(
         [
-            "PR supports ‘who to service first’; calibration supports ‘how risky is this vehicle’.",
+            "PR supports Ã¢â‚¬Ëœwho to service firstÃ¢â‚¬â„¢; calibration supports Ã¢â‚¬Ëœhow risky is this vehicleÃ¢â‚¬â„¢.",
             "Precision@K maps model performance to a real service queue size.",
         ]
     )
-    add_bullets(slide, bullets, MARGIN_L, BODY_TOP, full_w, BODY_H, font_size=18)
+    add_bullets(slide, bullets, MARGIN_L, BODY_TOP, full_w, BODY_H)
 
     # -----------------------------
     # Fleet triage
@@ -946,7 +978,7 @@ def main() -> None:
         [
             "Histogram: look for a small high-risk tail (few vehicles drive most of the risk).",
             "Cost vs risk: upper-right suggests high priority (high risk and high expected cost impact).",
-            "This view motivates why prioritization beats ‘first come, first served’.",
+            "This view motivates why prioritization beats Ã¢â‚¬Ëœfirst come, first servedÃ¢â‚¬â„¢.",
         ],
         left=MARGIN_L, top=note_y, width=full_w, height=NOTE_H
     )
@@ -1032,7 +1064,7 @@ def main() -> None:
     add_interpretation_panel(
         slide,
         [
-            "Abstentions are not ‘low risk’; they are ‘low trust’.",
+            "Abstentions are not Ã¢â‚¬Ëœlow riskÃ¢â‚¬â„¢; they are Ã¢â‚¬Ëœlow trustÃ¢â‚¬â„¢.",
             "Common causes: out-of-distribution features, missing signals, or probability uncertainty.",
             "Operationally: route these cases to technicians/engineers for targeted diagnosis.",
         ],
@@ -1062,7 +1094,7 @@ def main() -> None:
         slide,
         [
             "Index lists nearest historical cases for a queried vehicle (similar signals/usage profile).",
-            "Use evidence to explain the ranking: ‘this looks like past failures of type X’.",
+            "Use evidence to explain the ranking: Ã¢â‚¬Ëœthis looks like past failures of type XÃ¢â‚¬â„¢.",
             "This improves trust and helps engineers validate whether the recommendation makes sense.",
         ],
         left=MARGIN_L, top=note_y, width=full_w, height=NOTE_H
@@ -1077,14 +1109,14 @@ def main() -> None:
         bullets.append(f"Actionable vs Abstain: {triage_sum.get('n_actionable_ok','?')} vs {triage_sum.get('n_abstain','?')}.")
         bullets.append("Interpretation: abstentions represent uncertainty/OOD and should be manually reviewed.")
     else:
-        bullets.append("Triage summary missing → rerun report to regenerate.")
+        bullets.append("Triage summary missing Ã¢â€ â€™ rerun report to regenerate.")
     bullets.extend(
         [
-            "Risk distribution often shows a high-risk tail → prioritization yields high ROI.",
+            "Risk distribution often shows a high-risk tail Ã¢â€ â€™ prioritization yields high ROI.",
             "Service queue is a ranked shortlist; similar-case evidence supports transparency and debugging.",
         ]
     )
-    add_bullets(slide, bullets, MARGIN_L, BODY_TOP, full_w, BODY_H, font_size=18)
+    add_bullets(slide, bullets, MARGIN_L, BODY_TOP, full_w, BODY_H)
 
     # -----------------------------
     # Appendix
@@ -1133,6 +1165,7 @@ def main() -> None:
         )
 
     # Save
+    ensure_interpretation_panels(prs)
     out_path = Path(args.out)
     if not out_path.is_absolute():
         out_path = root / out_path
