@@ -1,0 +1,131 @@
+﻿project:
+  name: fleet-triage-agent
+  random_seed: 42
+
+paths:
+  data_raw_dir: data/raw
+  data_processed_dir: data/processed
+  outputs_dir: outputs
+  figures_dir: outputs/figures
+  tables_dir: outputs/tables
+  reports_dir: outputs/reports
+  mlflow_tracking_uri: mlruns
+
+simulation:
+  # Fast dev-setup (snabb iteration). Sen kan vi öka till t.ex. 200 fordon x 365 dagar.
+  n_vehicles: 50
+  start_date: "2024-01-01"
+  n_days: 180
+
+  subsystems:
+    - cooling
+    - aftertreatment
+    - drivetrain
+    - electrical
+    - brakes_wheel_end
+
+  horizons_days: [7, 30]
+
+  route_weather:
+    route_types: ["highway", "mixed", "urban"]
+    route_type_probs: [0.50, 0.35, 0.15]
+    hilliness_range: [0.0, 1.0]
+    stop_go_range: [0.0, 1.0]
+    ambient_temp_mean_c: 8.0
+    ambient_temp_std_c: 12.0
+    precipitation_prob: 0.25
+
+  # ~15 telematics features (daily summaries)
+  telematics_features:
+    - coolant_temp_avg_c
+    - coolant_temp_max_c
+    - egt_max_c
+    - battery_v_min
+    - fuel_rate_avg_lph
+    - regen_count
+    - idle_pct
+    - oil_temp_avg_c
+    - oil_pressure_min_kpa
+    - intake_air_temp_avg_c
+    - boost_pressure_avg_kpa
+    - dpf_delta_p_avg_kpa
+    - trans_temp_avg_c
+    - vibration_rms
+    - brake_wear_index
+
+  dtc:
+    max_distinct_codes_per_day: 3
+    base_event_rate_per_day: 0.05
+    # Kodlistan är förenklad men subsystem-konsistent för ett portföljprojekt.
+    catalog_by_subsystem:
+      cooling: ["P0117", "P0118", "P0128", "P0217"]
+      aftertreatment: ["P2002", "P204F", "P2463", "P0401"]
+      drivetrain: ["P0700", "P0730", "P0741", "P17F0"]
+      electrical: ["P0562", "P0563", "P0620", "U0100"]
+      brakes_wheel_end: ["C0035", "C0040", "C0110", "C1234"]
+
+  health_model:
+    initial_health_mean: 1.0
+    initial_health_std: 0.03
+
+    degradation_base_per_day:
+      cooling: 0.00060
+      aftertreatment: 0.00055
+      drivetrain: 0.00050
+      electrical: 0.00040
+      brakes_wheel_end: 0.00045
+
+    stress_weights:
+      duty_cycle: 0.80
+      ambient_temp_extreme: 0.35
+      hilliness: 0.45
+      stop_go: 0.35
+
+    # Hazardmodell (hybrid): realistisk + tolkningsbar.
+    hazard:
+      base_hazard: 0.00005
+      alpha_health: 6.0
+      alpha_dtc_recent: 0.70
+      alpha_spc_alert: 0.40
+
+modeling:
+  time_split_days:
+    train: 120
+    val: 30
+    test: 30
+
+  evaluation:
+    k_service_per_week: 10
+    primary_metric: precision_at_k
+
+  calibration:
+    method: isotonic
+
+agent:
+  guardrails:
+    # Enkla, vanliga och robusta regler för MVP
+    min_required_coverage: 0.95
+    min_confidence: 0.55
+    abstain_if_ood: true
+
+  ood:
+    method: isolation_forest
+    contamination: 0.02
+
+queue:
+  cost_model:
+    downtime_cost_per_day: 1.0
+    parts_lead_time_penalty_per_day: 0.20
+    severity_multiplier_by_subsystem:
+      cooling: 1.20
+      aftertreatment: 1.00
+      drivetrain: 1.40
+      electrical: 0.90
+      brakes_wheel_end: 1.10
+
+reporting:
+  weekly_report_day: "Mon"
+
+app:
+  streamlit:
+    default_page: "fleet_overview"

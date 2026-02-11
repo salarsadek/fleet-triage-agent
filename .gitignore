@@ -23,6 +23,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Archives
+*.zip
+
 # Data (keep folders, ignore contents)
 data/raw/*
 data/processed/*
@@ -43,6 +46,9 @@ report/auto_deck.pptx
 report/auto_deck.pdf
 report/auto_report.tex
 report/auto_report.pdf
+
+# Generated slide/table image assets used during deck build (do not commit)
+report/_deck_assets/
 
 # LaTeX build artifacts
 report/*.aux

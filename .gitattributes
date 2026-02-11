@@ -1,0 +1,14 @@
+# Default: store normalized LF in repo for text files (cross-platform)
+* text=auto eol=lf
+
+# Keep Windows PowerShell scripts CRLF in working tree
+*.ps1 text eol=crlf
+
+# Explicit LF for common files
+Makefile text eol=lf
+.gitattributes text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.py text eol=lf
