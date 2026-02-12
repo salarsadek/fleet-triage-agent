@@ -58,3 +58,6 @@ report/*.toc
 report/*.synctex.gz
 report/*.fls
 report/*.fdb_latexmk
+
+# Local share/export packages
+_share_pkg/
